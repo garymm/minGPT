@@ -4,23 +4,22 @@ Trains a GPT on the WikiText-2 dataset from Hugging Face.
 
 import os
 import sys
-import json
 
 import torch
-from torch.utils.data import Dataset
-from torch.utils.data.dataloader import DataLoader
 from datasets import load_dataset
 from tokenizers import Tokenizer
+from torch.utils.data import Dataset
+from torch.utils.data.dataloader import DataLoader
 
 from mingpt.model import GPT
 from mingpt.trainer import Trainer
-from mingpt.utils import set_seed, setup_logging, CfgNode as CN
+from mingpt.utils import CfgNode as CN
+from mingpt.utils import set_seed, setup_logging
 
 # -----------------------------------------------------------------------------
 
 
 def get_config():
-
     C = CN()
 
     # system
@@ -28,6 +27,7 @@ def get_config():
     C.system.seed = 3407
     C.system.work_dir = "./out/wikitext"
     C.system.profile = False  # Profile the training process
+    C.system.eval_every = 500  # Evaluate the model every N iterations
 
     # data
     C.data = WikiTextDataset.get_default_config()
@@ -59,8 +59,8 @@ class WikiTextDataset(Dataset):
         C = CN()
         C.block_size = 128  # Context size for the model
         C.dataset_name = "wikitext"
-        C.dataset_config = "wikitext-2-raw-v1"
-        C.tokenizer_name = "gpt2"  # Use the GPT-2 tokenizer by default
+        C.dataset_config = "wikitext-2-v1"  # TODO: switch to wikitext-103-v1
+        C.tokenizer_name = "gpt2"
         return C
 
     def __init__(self, config, split):
@@ -132,13 +132,15 @@ if __name__ == "__main__":
     trainer = Trainer(config.trainer, model, train_dataset)
 
     # helper function for evaluation
-    def eval_split(trainer, split):
+    def eval_split(trainer, split, max_batches=None):
         dataset = {"train": train_dataset, "test": test_dataset}[split]
         loader = DataLoader(dataset, batch_size=100, num_workers=0, drop_last=False)
 
         model.eval()
         losses = []
         for x, y in loader:
+            if max_batches and len(losses) >= max_batches:
+                break
             x, y = x.to(trainer.device), y.to(trainer.device)
             with torch.no_grad():
                 logits, loss = model(x, y)
@@ -171,7 +173,7 @@ if __name__ == "__main__":
 
         # Convert back to text using the tokenizer
         generated_text = train_dataset.tokenizer.decode(
-            generated[0], skip_special_tokens=True
+            list(generated[0]), skip_special_tokens=True
         )
         return generated_text
 
@@ -186,24 +188,20 @@ if __name__ == "__main__":
                 f"iter_dt {trainer.iter_dt * 1000:.2f}ms; iter {trainer.iter_num}: train loss {trainer.loss.item():.5f}"
             )
 
-        if trainer.iter_num % 500 == 0:
+        if (
+            config.system.eval_every
+            and trainer.iter_num % config.system.eval_every == 0
+        ):
             # evaluate both the train and test score
             model.eval()
             with torch.no_grad():
-                test_loss = eval_split(trainer, "test")
+                test_loss = eval_split(trainer, "test", max_batches=100)
 
                 # Generate some sample text
                 print("\nSample text generation:")
                 sample_text = generate_text(model, max_tokens=50)
                 print(sample_text)
                 print("-" * 50)
-
-            # save the model if this is the best score we've seen so far
-            if test_loss < best_loss:
-                best_loss = test_loss
-                print(f"saving model with new best loss of {test_loss:.4f}")
-                ckpt_path = os.path.join(config.system.work_dir, "model.pt")
-                torch.save(model.state_dict(), ckpt_path)
 
             # revert model to training mode
             model.train()
@@ -212,16 +210,19 @@ if __name__ == "__main__":
 
     # run the optimization
     if config.system.profile:
-        from torch.profiler import profile, record_function, ProfilerActivity
+        # warm up
+        eval_split(trainer, "test", max_batches=1)
+        from torch.profiler import ProfilerActivity, profile, record_function
 
         # Configure the profiler
         with profile(
             activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
             record_shapes=True,
             profile_memory=True,
-            with_stack=True,
+            # Breaks because of https://github.com/pytorch/pytorch/issues/146900
+            with_stack=False,
         ) as prof:
-            with record_function("model_training"):
+            with record_function("trainer.run"):
                 trainer.run()
 
         # Print and save profiling results
