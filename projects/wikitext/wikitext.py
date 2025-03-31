@@ -10,6 +10,7 @@ import torch
 from torch.utils.data import Dataset
 from torch.utils.data.dataloader import DataLoader
 from datasets import load_dataset
+from tokenizers import Tokenizer
 
 from mingpt.model import GPT
 from mingpt.trainer import Trainer
@@ -32,7 +33,7 @@ def get_config():
 
     # model
     C.model = GPT.get_default_config()
-    C.model.model_type = "gpt2-xl"  # Start with a smaller model for faster training
+    C.model.model_type = "gpt2-xl"
 
     # trainer
     C.trainer = Trainer.get_default_config()
@@ -49,7 +50,7 @@ def get_config():
 class WikiTextDataset(Dataset):
     """
     Dataset for WikiText-2 from Hugging Face. Processes the text into chunks
-    of block_size tokens for training.
+    of block_size tokens for training using a standard HuggingFace tokenizer.
     """
 
     @staticmethod
@@ -58,6 +59,7 @@ class WikiTextDataset(Dataset):
         C.block_size = 128  # Context size for the model
         C.dataset_name = "wikitext"
         C.dataset_config = "wikitext-2-raw-v1"
+        C.tokenizer_name = "gpt2"  # Use the GPT-2 tokenizer by default
         return C
 
     def __init__(self, config, split):
@@ -72,25 +74,25 @@ class WikiTextDataset(Dataset):
             self.config.dataset_name, self.config.dataset_config, split=hf_split
         )
 
-        # Build vocabulary from dataset
-        self.chars = sorted(list(set("".join(self.dataset["text"]))))
-        self.stoi = {ch: i for i, ch in enumerate(self.chars)}
-        self.itos = {i: ch for i, ch in enumerate(self.chars)}
+        # Load the tokenizer from HuggingFace
+        self.tokenizer = Tokenizer.from_pretrained(self.config.tokenizer_name)
 
         # Process dataset into token sequences
         self.data = self._prepare_data()
 
     def _prepare_data(self):
-        """Process the dataset into token sequences."""
+        """Process the dataset into token sequences using the tokenizer."""
         # Concatenate all texts in the dataset
         all_text = " ".join(self.dataset["text"])
 
-        # Encode the text as integers
-        data = torch.tensor([self.stoi[c] for c in all_text], dtype=torch.long)
-        return data
+        # Tokenize the entire text
+        encodings = self.tokenizer.encode(all_text)
+
+        # Extract token IDs as a flat tensor
+        return torch.tensor(encodings.ids, dtype=torch.long).squeeze()
 
     def get_vocab_size(self):
-        return len(self.chars)
+        return self.tokenizer.get_vocab_size()
 
     def get_block_size(self):
         return self.config.block_size
@@ -109,7 +111,6 @@ class WikiTextDataset(Dataset):
 # -----------------------------------------------------------------------------
 
 if __name__ == "__main__":
-
     # get default config and overrides from the command line, if any
     config = get_config()
     config.merge_from_args(sys.argv[1:])
@@ -152,9 +153,10 @@ if __name__ == "__main__":
 
         # Convert prompt to token ids if provided
         if prompt:
-            context = torch.tensor(
-                [[train_dataset.stoi[c] for c in prompt]], dtype=torch.long
-            ).to(trainer.device)
+            # Use the tokenizer to encode the prompt
+            context = train_dataset.tokenizer(prompt, return_tensors="pt").input_ids.to(
+                trainer.device
+            )
         else:
             # Start with a random seed from the dataset
             idx = torch.randint(0, len(train_dataset), (1,))
@@ -166,9 +168,11 @@ if __name__ == "__main__":
             context, max_new_tokens=max_tokens, do_sample=True, temperature=0.8
         )
 
-        # Convert back to text
-        generated_chars = [train_dataset.itos[int(i)] for i in generated[0]]
-        return "".join(generated_chars)
+        # Convert back to text using the tokenizer
+        generated_text = train_dataset.tokenizer.decode(
+            generated[0], skip_special_tokens=True
+        )
+        return generated_text
 
     # iteration callback
     best_loss = float("inf")
