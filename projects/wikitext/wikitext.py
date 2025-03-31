@@ -27,6 +27,7 @@ def get_config():
     C.system = CN()
     C.system.seed = 3407
     C.system.work_dir = "./out/wikitext"
+    C.system.profile = False  # Profile the training process
 
     # data
     C.data = WikiTextDataset.get_default_config()
@@ -210,4 +211,24 @@ if __name__ == "__main__":
     trainer.set_callback("on_batch_end", batch_end_callback)
 
     # run the optimization
-    trainer.run()
+    if config.system.profile:
+        from torch.profiler import profile, record_function, ProfilerActivity
+
+        # Configure the profiler
+        with profile(
+            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+            record_shapes=True,
+            profile_memory=True,
+            with_stack=True,
+        ) as prof:
+            with record_function("model_training"):
+                trainer.run()
+
+        # Print and save profiling results
+        print(prof.key_averages().table(sort_by="cpu_time_total", row_limit=20))
+        prof_path = os.path.join(config.system.work_dir, "profile_results")
+        os.makedirs(prof_path, exist_ok=True)
+        prof.export_chrome_trace(os.path.join(prof_path, "trace.json"))
+        print(f"Profiling results saved to {prof_path}")
+    else:
+        trainer.run()
