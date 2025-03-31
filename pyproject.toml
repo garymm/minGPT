@@ -12,6 +12,7 @@ dependencies = [
     "ipykernel>=6.29.5",
     "numpy>=2.2.4",
     "torch>=2.6.0",
+    "datasets>=2.16.0",
 ]
 [tool.setuptools]
 packages = ["mingpt"]
