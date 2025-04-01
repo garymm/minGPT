@@ -4,6 +4,8 @@ Trains a GPT on the WikiText-2 dataset from Hugging Face.
 
 import os
 import sys
+import time
+from datetime import datetime
 
 import torch
 from datasets import load_dataset
@@ -206,30 +208,71 @@ if __name__ == "__main__":
             # revert model to training mode
             model.train()
 
-    trainer.set_callback("on_batch_end", batch_end_callback)
+    eval_split(trainer, "test", max_batches=1)
+    # Calculate total tokens that will be processed
+    tokens_per_batch = config.trainer.batch_size * config.data.block_size
+    start_time = time.time()
 
-    # run the optimization
+    # warm up
     if config.system.profile:
-        # warm up
-        eval_split(trainer, "test", max_batches=1)
         from torch.profiler import ProfilerActivity, profile, record_function
 
+        # Get timestamp for file naming
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
         # Configure the profiler
+        torch.cuda.memory._record_memory_history()
+
         with profile(
             activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
             record_shapes=True,
-            profile_memory=True,
             # Breaks because of https://github.com/pytorch/pytorch/issues/146900
             with_stack=False,
         ) as prof:
             with record_function("trainer.run"):
                 trainer.run()
 
+        end_time = time.time()
+        total_time = end_time - start_time
+        total_tokens = tokens_per_batch * trainer.iter_num
+        tokens_per_second = total_tokens / total_time
+
         # Print and save profiling results
         print(prof.key_averages().table(sort_by="cpu_time_total", row_limit=20))
+        print(f"Tokens per second: {tokens_per_second:,.2f}")
+
+        # Save results
         prof_path = os.path.join(config.system.work_dir, "profile_results")
         os.makedirs(prof_path, exist_ok=True)
-        prof.export_chrome_trace(os.path.join(prof_path, "trace.json"))
-        print(f"Profiling results saved to {prof_path}")
+
+        # Save trace with timestamp
+        trace_file = os.path.join(prof_path, f"trace_{timestamp}.json")
+        prof.export_chrome_trace(trace_file)
+
+        # Save metrics with timestamp
+        metrics_file = os.path.join(prof_path, f"metrics_{timestamp}.txt")
+        with open(metrics_file, "w") as f:
+            f.write("Profile Results\n")
+            f.write(f"Timestamp: {timestamp}\n")
+            f.write(f"Total tokens processed: {total_tokens:,}\n")
+            f.write(f"Total time: {total_time:.2f} seconds\n")
+            f.write(f"Tokens per second: {tokens_per_second:,.2f}\n")
+            f.write("\nConfiguration:\n")
+            f.write(f"Batch size: {config.trainer.batch_size}\n")
+            f.write(f"Block size: {config.data.block_size}\n")
+            f.write(f"Total iterations: {trainer.iter_num}\n")
+
+        torch.cuda.memory._dump_snapshot(
+            os.path.join(prof_path, f"memory_timeline_{timestamp}.pkl")
+        )
+
+        print(f"Profiling results saved to: {prof_path}")
+
     else:
+        trainer.set_callback("on_batch_end", batch_end_callback)
         trainer.run()
+        end_time = time.time()
+        total_time = end_time - start_time
+        total_tokens = tokens_per_batch * trainer.iter_num
+        tokens_per_second = total_tokens / total_time
+        print(f"Tokens per second: {tokens_per_second:,.2f}")
