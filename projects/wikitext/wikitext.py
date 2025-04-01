@@ -37,6 +37,7 @@ def get_config():
     # model
     C.model = GPT.get_default_config()
     C.model.model_type = "gpt2-xl"
+    C.model.compile_mode = None
 
     # trainer
     C.trainer = Trainer.get_default_config()
@@ -129,6 +130,8 @@ if __name__ == "__main__":
     config.model.vocab_size = train_dataset.get_vocab_size()
     config.model.block_size = train_dataset.get_block_size()
     model = GPT(config.model)
+    if config.model.compile_mode:
+        model = torch.compile(model, fullgraph=True, mode=config.model.compile_mode)
 
     # construct the trainer object
     trainer = Trainer(config.trainer, model, train_dataset)
@@ -208,12 +211,17 @@ if __name__ == "__main__":
             # revert model to training mode
             model.train()
 
-    eval_split(trainer, "test", max_batches=1)
+    # warm up
+    max_iters = config.trainer.max_iters
+    config.trainer.max_iters = 1
+    trainer.run()
+    model.zero_grad()
+    config.trainer.max_iters = max_iters
+
     # Calculate total tokens that will be processed
     tokens_per_batch = config.trainer.batch_size * config.data.block_size
     start_time = time.time()
 
-    # warm up
     if config.system.profile:
         from torch.profiler import ProfilerActivity, profile, record_function
 
